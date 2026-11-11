@@ -24,7 +24,7 @@ Remove-Item Env:GOOS, Env:GOARCH
 3. Enter one free DMR ID, select both requested HTTPS hosts, and click **Upload and start**.
 4. Send `29401` as a private text to that ID from a radio on the owner's hotspot or an admin-trusted repeater.
 
-ZIP Weather needs DMRHub v1.3.28 or newer and accepts ZIP codes in any private text format DMRHub can decode. A compressed ETSI IP request gets a full ETSI IP reply on the same timeslot through DMRHub's private data routing. Other requests use the hub's text reply API, which requires a reproducible reply format.
+ZIP Weather accepts ZIP codes in any private text format DMRHub can decode. The plugin decodes compressed ETSI IP requests directly and sends a full ETSI IP reply on the same timeslot through DMRHub's private data routing. Other formats require DMRHub v1.3.28 or newer and a reply format the hub can reproduce.
 
 To update an existing installation, open **ZIP Weather** under **Admin > Plugins** and select **Upload a new version**. This keeps its assigned DMR ID and host permissions.
 
