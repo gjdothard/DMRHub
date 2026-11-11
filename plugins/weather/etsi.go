@@ -22,6 +22,7 @@ package weather
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -37,6 +38,8 @@ import (
 const (
 	airReplyLifetime = 40 * time.Second
 	maxAirReceivers  = 128
+	airTurnaround    = time.Second
+	airRetryWindow   = 3 * time.Second
 )
 
 type airRoute struct {
@@ -52,8 +55,8 @@ type airLink struct {
 	compressed      bool
 }
 
-// etsiReplies correlates a validated hub text with the original DMR data
-// bursts. The Text event alone does not distinguish full and compressed IP.
+// etsiReplies decodes compressed ETSI IP from DMR data bursts. Matching
+// hub text events are ignored so one packet gets one weather reply.
 type etsiReplies struct {
 	mu    sync.Mutex
 	links map[airRoute]*airLink
@@ -61,11 +64,12 @@ type etsiReplies struct {
 	busy  chan struct{}
 }
 
-func (e *etsiReplies) observe(b *pluginv1.Burst) {
+func (e *etsiReplies) observe(b *pluginv1.Burst) (*pluginv1.Text, enums.ColorCode) {
 	if b.GetGroupCall() || b.GetRepeater() == 0 ||
+		(b.GetSlot() != 1 && b.GetSlot() != 2) ||
 		b.GetFrameType() != pluginv1.FrameType_FRAME_TYPE_DATA_SYNC ||
 		len(b.GetPayload()) != len(layer2.RawBurst{}) {
-		return
+		return nil, 0
 	}
 	key := airRoute{b.GetSource(), b.GetDestination(), b.GetRepeater(), b.GetSlot()}
 	now := time.Now()
@@ -81,7 +85,7 @@ func (e *etsiReplies) observe(b *pluginv1.Burst) {
 			}
 		}
 		if len(e.links) >= maxAirReceivers {
-			return
+			return nil, 0
 		}
 		link = &airLink{}
 		e.links[key] = link
@@ -89,7 +93,7 @@ func (e *etsiReplies) observe(b *pluginv1.Burst) {
 	if link.rx == nil || link.stream != b.GetStreamId() {
 		rx, err := data.NewReceiver(&data.ReceiverConfig{Address: key.destination, Lost: -1})
 		if err != nil {
-			return
+			return nil, 0
 		}
 		link.rx, link.stream, link.start = rx, b.GetStreamId(), now
 	}
@@ -101,37 +105,46 @@ func (e *etsiReplies) observe(b *pluginv1.Burst) {
 		if event.Kind != data.EventDelivered && event.Kind != data.EventReassembled {
 			continue
 		}
-		link.compressed = false
 		m := event.Message
 		sap, ok := m.Header.SAP()
 		if !ok || sap != enums.SAPUDPIPHeaderCompression || m.BadCRC {
+			link.compressed = false
 			continue
 		}
 		body, text, err := sms.Decode(nil, &m.Header, m.Payload)
 		if err == nil && text.Format == sms.FormatIP && !text.Group &&
 			text.Source == key.source && text.Destination == key.destination {
+			retry := link.compressed && link.body == string(body) && now.Sub(link.at) < airRetryWindow
 			link.at, link.body, link.colorCode = now, string(body), raw.SlotType().ColorCode
 			link.compressed = true
+			if retry {
+				return nil, 0
+			}
+			return &pluginv1.Text{
+				Source: key.source, Destination: key.destination, Repeater: key.repeater, Slot: key.slot,
+				At: now.UnixMilli(), Format: sms.FormatIP.String(), Body: link.body,
+			}, link.colorCode
 		}
 	}
+	return nil, 0
 }
 
-func (e *etsiReplies) match(t *pluginv1.Text) (enums.ColorCode, bool) {
+func (e *etsiReplies) matches(t *pluginv1.Text) bool {
 	if t.GetGroup() || t.GetFormat() != sms.FormatIP.String() ||
 		(t.GetSlot() != 1 && t.GetSlot() != 2) {
-		return 0, false
+		return false
 	}
 	key := airRoute{t.GetSource(), t.GetDestination(), t.GetRepeater(), t.GetSlot()}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	link := e.links[key]
 	if link == nil || !link.compressed || time.Since(link.at) > airReplyLifetime || link.body != t.GetBody() {
-		return 0, false
+		return false
 	}
 	if t.GetAt() != 0 && link.at.Sub(time.UnixMilli(t.GetAt())).Abs() > 5*time.Second {
-		return 0, false
+		return false
 	}
-	return link.colorCode, true
+	return true
 }
 
 func (e *etsiReplies) reply(ctx context.Context, source uint32, t *pluginv1.Text, body string, cc enums.ColorCode) (string, error) {
@@ -153,9 +166,19 @@ func (e *etsiReplies) reply(ctx context.Context, source uint32, t *pluginv1.Text
 	case <-ctx.Done():
 		return "", fmt.Errorf("wait to send ETSI IP reply: %w", ctx.Err())
 	}
+	if remaining := time.Until(time.UnixMilli(t.GetAt()).Add(airTurnaround)); remaining > 0 {
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return "", fmt.Errorf("wait for radio turnaround: %w", ctx.Err())
+		}
+	}
 	if err := plugin.Play(ctx, e.send, bursts); err != nil {
 		return "", fmt.Errorf("send full ETSI IP reply: %w", err)
 	}
+	slog.Info("ZIP Weather: full ETSI IP reply submitted to the hub", "radio", t.GetSource(), "slot", t.GetSlot(), "stream", bursts[0].GetStreamId())
 	return sms.FormatIP.String(), nil
 }
 
