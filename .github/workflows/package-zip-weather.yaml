@@ -1,0 +1,46 @@
+name: Package ZIP Weather
+
+on:
+  push:
+    paths:
+      - 'plugins/weather/**'
+      - 'sdk/plugin/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/package-zip-weather.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go test ./plugins/weather/...
+      - name: Build the uploadable plugin
+        env:
+          GOOS: wasip1
+          GOARCH: wasm
+        run: |
+          go build -trimpath -ldflags='-s -w' -o dmrhub-weather.wasm ./plugins/weather/cmd/weather
+          test -s dmrhub-weather.wasm
+          test "$(wc -c < dmrhub-weather.wasm)" -le 33554432
+      - name: Check the module with DMRHub's plugin loader
+        env:
+          ZIP_WEATHER_WASM: ${{ github.workspace }}/dmrhub-weather.wasm
+        run: go test ./plugins/weather -run '^TestUploadableManifest@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dmrhub-weather-wasm
+          path: dmrhub-weather.wasm
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dmrhub-weather-wasm
+          path: dmrhub-weather.wasm
+          if-no-files-found: error
