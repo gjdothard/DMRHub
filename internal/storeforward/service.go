@@ -425,38 +425,28 @@ func RadioText(db *gorm.DB, radio uint) (*models.Message, *Format, error) {
 // admin trusts, as RadioText does for the last text of a radio. It returns
 // ErrNoFormat for any other message, and the errors of FormatOf.
 func MessageText(db *gorm.DB, id uint64, radio, dst uint) (*models.Message, *Format, error) {
-	m, _, err := MessageForReply(db, id, radio, dst)
-	if err != nil {
-		return nil, nil, err
-	}
-	f, err := FormatOf(m)
-	if err != nil {
-		return nil, nil, err
-	}
-	return m, f, nil
-}
-
-// MessageForReply finds the private message and the radio owner. The
-// message must have come through the owner's repeater or a trusted one.
-func MessageForReply(db *gorm.DB, id uint64, radio, dst uint) (*models.Message, uint, error) {
 	owner, ok, err := models.RadioIDOwner(db, radio)
 	if err != nil {
-		return nil, 0, fmt.Errorf("storeforward: finding the owner of radio %d: %w", radio, err)
+		return nil, nil, fmt.Errorf("storeforward: finding the owner of radio %d: %w", radio, err)
 	}
 	if !ok {
-		return nil, 0, ErrNoFormat
+		return nil, nil, ErrNoFormat
 	}
 	var found []models.Message
 	err = db.Where("id = ? AND source_id = ? AND destination_id = ? AND is_group = ?", id, radio, dst, false).
 		Where("repeater_id IN (SELECT id FROM repeaters WHERE owner_id = ? OR trusted = ?)", owner, true).
 		Limit(1).Find(&found).Error
 	if err != nil {
-		return nil, 0, fmt.Errorf("storeforward: finding text %d of radio %d: %w", id, radio, err)
+		return nil, nil, fmt.Errorf("storeforward: finding text %d of radio %d: %w", id, radio, err)
 	}
 	if len(found) == 0 {
-		return nil, 0, ErrNoFormat
+		return nil, nil, ErrNoFormat
 	}
-	return &found[0], owner, nil
+	f, err := FormatOf(&found[0])
+	if err != nil {
+		return nil, nil, err
+	}
+	return &found[0], f, nil
 }
 
 // Heard sends the texts held for radio, which the hub heard on the
