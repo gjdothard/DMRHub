@@ -350,10 +350,6 @@ func (c *Conn) SendText(ctx context.Context, source, radio uint32, body string) 
 	return a.GetTextSent().GetFormat(), nil
 }
 
-// FullETSIIPReplySwitch is the key for a per-user plugin switch that opts
-// the user's radios into replies in full ETSI IP.
-const FullETSIIPReplySwitch = "full-etsi-ip-replies"
-
 // ReplyText asks the hub to answer text, a Text to one of the plugin's
 // IDs, with body from source, and returns the name of the format the hub
 // sent it in. The hub builds the answer in the exact format of text, not of
