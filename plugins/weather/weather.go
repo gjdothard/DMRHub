@@ -53,12 +53,6 @@ func Hello() *pluginv1.Hello {
 			{Address: zipAPIHost + ":443", Reason: "Looks up the coordinates of a U.S. ZIP code."},
 			{Address: nwsAPIHost + ":443", Reason: "Gets nearby National Weather Service observations."},
 		},
-		Switches: []*pluginv1.Switch{{
-			Key:         plugin.FullETSIIPReplySwitch,
-			Title:       "Full ETSI IP weather replies",
-			Description: "Use full ETSI IP for ZIP Weather replies regardless of the incoming text format.",
-			Notice:      "Enable only if all radios on your account can receive full ETSI IP texts.",
-		}},
 	}
 }
 
@@ -68,6 +62,7 @@ type textReply func(context.Context, uint32, *pluginv1.Text, string) (string, er
 type responder struct {
 	lookup weatherLookup
 	reply  textReply
+	etsi   *etsiReplies
 }
 
 // Serve subscribes to private text requests and answers through the hub.
@@ -100,11 +95,22 @@ func Serve(ctx context.Context, conn *plugin.Conn) error {
 		},
 	}
 	defer client.CloseIdleConnections()
+	etsi := &etsiReplies{links: make(map[airRoute]*airLink), send: conn.Send, busy: make(chan struct{}, 1)}
 	r := responder{
 		lookup: weatherAPI{client: client}.lookup,
+		etsi:   etsi,
 		reply: func(ctx context.Context, source uint32, t *pluginv1.Text, body string) (string, error) {
+			if cc, ok := etsi.match(t); ok {
+				return etsi.reply(ctx, source, t, body, cc)
+			}
 			if conn.Has(pluginv1.Feature_FEATURE_PROMPT) {
-				return conn.ReplyText(ctx, source, t, body)
+				format, err := conn.ReplyText(ctx, source, t, body)
+				if errors.Is(err, plugin.ErrNoFormat) {
+					if cc, ok := etsi.match(t); ok {
+						return etsi.reply(ctx, source, t, body, cc)
+					}
+				}
+				return format, err
 			}
 			// Older hubs choose the format and route from the radio's last
 			// supported text through an owned or trusted repeater.
@@ -129,6 +135,14 @@ func (r responder) receive(ctx context.Context, recv func() (*pluginv1.ConnectRe
 		message, err := recv()
 		if err != nil {
 			return fmt.Errorf("receive weather text: %w", err)
+		}
+		if b := message.GetBurst(); b != nil && r.etsi != nil {
+			r.etsi.observe(b)
+			continue
+		}
+		if refusal := message.GetRefusal(); refusal != nil {
+			slog.Warn("ZIP Weather: the hub refused a reply burst", "reason", refusal.GetReason(), "stream", refusal.GetStreamId())
+			continue
 		}
 		t := message.GetText()
 		if t == nil || t.GetGroup() || t.GetRepeater() == 0 || t.GetId() == 0 {
