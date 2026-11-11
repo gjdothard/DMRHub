@@ -31,6 +31,7 @@ import (
 	"github.com/USA-RedDragon/DMRHub/internal/plugins"
 	"github.com/USA-RedDragon/DMRHub/internal/plugintexts"
 	"github.com/USA-RedDragon/DMRHub/internal/testutils/memdb"
+	"github.com/USA-RedDragon/DMRHub/sdk/plugin"
 	"github.com/USA-RedDragon/configulator/v2"
 	"github.com/USA-RedDragon/dmrgo/v2/data"
 	"github.com/USA-RedDragon/dmrgo/v2/enums"
@@ -150,6 +151,63 @@ func TestNoTextGoesToARadioWithoutAKnownFormat(t *testing.T) {
 	assert.Empty(t, out.all())
 }
 
+func TestPluginCanReplyInFullETSIIPToAnyPrivateTextForAnOptedInRadio(t *testing.T) {
+	t.Parallel()
+	database := openDB(t)
+	now := time.Now()
+	p, _, err := models.CreatePlugin(database, "ZIP Weather", []models.PluginRange{{First: service, Last: service}}, now)
+	require.NoError(t, err)
+	key := plugin.FullETSIIPReplySwitch
+	require.NoError(t, models.SetPluginSwitches(database, p.ID, []models.PluginSwitchSpec{{
+		Key: key, Title: "Full ETSI IP", Description: "Reply in full ETSI IP.",
+	}}))
+	out := &fakeSender{result: data.ResultSent}
+	texts := plugintexts.New(database, out)
+	body := "12345"
+	for _, format := range []models.MessageFormat{models.MessageFormatIP, models.MessageFormatTMS, models.MessageFormatUDT} {
+		msg := models.Message{
+			ReceivedAt: now, SourceID: radio, DestinationID: service, RepeaterID: ownRepeater, Slot: 2,
+			Text: &body, Format: format, ChecksumOK: true,
+		}
+		require.NoError(t, database.Create(&msg).Error)
+		id := uint64(msg.ID)
+
+		_, err := models.SetUserPluginSwitch(database, p.ID, owner, key, false, "", now)
+		require.NoError(t, err)
+		_, err = texts.ReplyTextForPlugin(t.Context(), p.ID, service, id, radio, "68F Clear")
+		require.ErrorIs(t, err, plugins.ErrNoFormat, "cannot infer the format from a non-reproducible template")
+
+		_, err = models.SetUserPluginSwitch(database, p.ID, owner, key, true, "", now)
+		require.NoError(t, err)
+		sentFormat, err := texts.ReplyTextForPlugin(t.Context(), p.ID, service, id, radio, "68F Clear")
+		require.NoError(t, err)
+		assert.Equal(t, sms.FormatIP.String(), sentFormat)
+		got := out.all()
+		reply := got[len(got)-1]
+		assert.Equal(t, uint(ownRepeater), reply.repeater)
+		assert.True(t, reply.slot)
+		sap, ok := reply.m.Header.SAP()
+		require.True(t, ok)
+		assert.Equal(t, enums.SAPIPBasedPacketData, sap)
+		decodedBody, decoded, err := sms.Decode(nil, &reply.m.Header, reply.m.Payload)
+		require.NoError(t, err)
+		assert.Equal(t, "68F Clear", string(decodedBody))
+		assert.Equal(t, sms.FormatIP, decoded.Format)
+		assert.Equal(t, uint32(service), decoded.Source)
+		assert.Equal(t, uint32(radio), decoded.Destination)
+	}
+	assert.Len(t, out.all(), 3)
+
+	untrusted := models.Message{
+		ReceivedAt: now, SourceID: radio, DestinationID: service, RepeaterID: otherRepeater, Slot: 2,
+		Text: &body, Format: models.MessageFormatIP, ChecksumOK: true,
+	}
+	require.NoError(t, database.Create(&untrusted).Error)
+	_, err = texts.ReplyTextForPlugin(t.Context(), p.ID, service, uint64(untrusted.ID), radio, "68F Clear")
+	require.ErrorIs(t, err, plugins.ErrNoFormat)
+	assert.Len(t, out.all(), 3)
+}
+
 func TestATextThroughAnUntrustedRepeaterSetsNoFormat(t *testing.T) {
 	t.Parallel()
 	database := openDB(t)
@@ -183,7 +241,7 @@ func TestATextThatTheFormatCannotCarryIsNotSent(t *testing.T) {
 	database := openDB(t)
 	radioSentText(t, database, ownRepeater, &sms.Text{Format: sms.FormatDefinedData, DD: enums.DD7Bit, Source: radio, Destination: service, Body: []byte("seven bit")}, enums.DataTypeRate12)
 	out := &fakeSender{result: data.ResultSent}
-	_, err := plugintexts.New(database, out).SendText(context.Background(), service, radio, "中文")
+	_, err := plugintexts.New(database, out).SendText(context.Background(), service, radio, "??")
 	require.ErrorIs(t, err, plugins.ErrTextDoesNotFit)
 	assert.Empty(t, out.all())
 }
