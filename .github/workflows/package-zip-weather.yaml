@@ -33,7 +33,7 @@ jobs:
       - name: Check the module with DMRHub's plugin loader
         env:
           ZIP_WEATHER_WASM: ${{ github.workspace }}/dmrhub-weather.wasm
-        run: go test ./plugins/weather -run '^TestUploadableManifest$'
+        run: go test ./plugins/weather -run '^TestUploadable'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dmrhub-weather-wasm
