@@ -47,7 +47,7 @@ const (
 func Hello() *pluginv1.Hello {
 	return &pluginv1.Hello{
 		Name:        "ZIP Weather",
-		Version:     "0.1.2",
+		Version:     "0.1.3",
 		Description: "Replies to a private DMR text containing a five-digit U.S. ZIP code with current weather observations.",
 		Hosts: []*pluginv1.Host{
 			{Address: zipAPIHost + ":443", Reason: "Looks up the coordinates of a U.S. ZIP code."},
@@ -67,18 +67,14 @@ type responder struct {
 
 // Serve subscribes to private text requests and answers through the hub.
 func Serve(ctx context.Context, conn *plugin.Conn) error {
-	if !conn.Has(pluginv1.Feature_FEATURE_TEXTS) ||
-		(!conn.Has(pluginv1.Feature_FEATURE_PROMPT) && !conn.Has(pluginv1.Feature_FEATURE_SEND_TEXT)) {
-		slog.Warn("ZIP Weather: the hub does not support receiving and sending plugin texts; use DMRHub v1.3.28 or newer")
-		for {
-			if _, err := conn.Recv(); err != nil {
-				return fmt.Errorf("receive from hub: %w", err)
-			}
+	if conn.Has(pluginv1.Feature_FEATURE_TEXTS) {
+		if err := conn.Subscribe(&pluginv1.Subscribe{Texts: true}); err != nil {
+			return fmt.Errorf("subscribe to weather texts: %w", err)
 		}
+	} else {
+		slog.Warn("ZIP Weather: hub text events unavailable; listening for compressed ETSI IP bursts")
 	}
-	if err := conn.Subscribe(&pluginv1.Subscribe{Texts: true}); err != nil {
-		return fmt.Errorf("subscribe to weather texts: %w", err)
-	}
+	slog.Info("ZIP Weather: ready", "text_events", conn.Has(pluginv1.Feature_FEATURE_TEXTS), "exact_replies", conn.Has(pluginv1.Feature_FEATURE_PROMPT))
 
 	client := &http.Client{
 		Timeout: requestWait,
@@ -100,17 +96,8 @@ func Serve(ctx context.Context, conn *plugin.Conn) error {
 		lookup: weatherAPI{client: client}.lookup,
 		etsi:   etsi,
 		reply: func(ctx context.Context, source uint32, t *pluginv1.Text, body string) (string, error) {
-			if cc, ok := etsi.match(t); ok {
-				return etsi.reply(ctx, source, t, body, cc)
-			}
 			if conn.Has(pluginv1.Feature_FEATURE_PROMPT) {
-				format, err := conn.ReplyText(ctx, source, t, body)
-				if errors.Is(err, plugin.ErrNoFormat) {
-					if cc, ok := etsi.match(t); ok {
-						return etsi.reply(ctx, source, t, body, cc)
-					}
-				}
-				return format, err
+				return conn.ReplyText(ctx, source, t, body)
 			}
 			// Older hubs choose the format and route from the radio's last
 			// supported text through an owned or trusted repeater.
@@ -129,6 +116,19 @@ func (r responder) receive(ctx context.Context, recv func() (*pluginv1.ConnectRe
 	}()
 
 	active := make(chan struct{}, maxPending)
+	dispatch := func(t *pluginv1.Text, reply textReply) bool {
+		select {
+		case active <- struct{}{}:
+			pending.Go(func() {
+				defer func() { <-active }()
+				r.answerWith(ctx, t, reply)
+			})
+			return true
+		default:
+			slog.Warn("ZIP Weather: all workers busy", "radio", t.GetSource())
+			return false
+		}
+	}
 	seen := make(map[uint64]time.Time)
 	var pruneAt time.Time
 	for {
@@ -137,7 +137,12 @@ func (r responder) receive(ctx context.Context, recv func() (*pluginv1.ConnectRe
 			return fmt.Errorf("receive weather text: %w", err)
 		}
 		if b := message.GetBurst(); b != nil && r.etsi != nil {
-			r.etsi.observe(b)
+			if t, cc := r.etsi.observe(b); t != nil {
+				slog.Info("ZIP Weather: decoded compressed ETSI IP request", "radio", t.GetSource(), "repeater", t.GetRepeater(), "slot", t.GetSlot())
+				dispatch(t, func(ctx context.Context, source uint32, text *pluginv1.Text, body string) (string, error) {
+					return r.etsi.reply(ctx, source, text, body, cc)
+				})
+			}
 			continue
 		}
 		if refusal := message.GetRefusal(); refusal != nil {
@@ -161,20 +166,33 @@ func (r responder) receive(ctx context.Context, recv func() (*pluginv1.ConnectRe
 		if now.Before(seen[t.GetId()]) {
 			continue
 		}
-		select {
-		case active <- struct{}{}:
+		if r.etsi != nil && r.etsi.matches(t) {
 			seen[t.GetId()] = now.Add(duplicateTTL)
-			pending.Go(func() {
-				defer func() { <-active }()
-				r.answer(ctx, t)
-			})
-		default:
-			slog.Debug("ZIP Weather: all workers busy", "text_id", t.GetId())
+			continue
+		}
+		slog.Info("ZIP Weather: received hub text", "text_id", t.GetId(), "radio", t.GetSource(), "format", t.GetFormat(), "slot", t.GetSlot())
+		if dispatch(t, r.replyHubText) {
+			seen[t.GetId()] = now.Add(duplicateTTL)
 		}
 	}
 }
 
+func (r responder) replyHubText(ctx context.Context, source uint32, t *pluginv1.Text, body string) (string, error) {
+	if r.etsi != nil && r.etsi.matches(t) {
+		return "", nil
+	}
+	format, err := r.reply(ctx, source, t, body)
+	if errors.Is(err, plugin.ErrNoFormat) && r.etsi != nil && r.etsi.matches(t) {
+		return "", nil
+	}
+	return format, err
+}
+
 func (r responder) answer(ctx context.Context, t *pluginv1.Text) {
+	r.answerWith(ctx, t, r.reply)
+}
+
+func (r responder) answerWith(ctx context.Context, t *pluginv1.Text, reply textReply) {
 	zip := strings.TrimSpace(t.GetBody())
 	var body, short string
 	if validZIP(zip) {
@@ -199,13 +217,13 @@ func (r responder) answer(ctx context.Context, t *pluginv1.Text) {
 
 	replyCtx, cancel := context.WithTimeout(ctx, replyWait)
 	defer cancel()
-	_, err := r.reply(replyCtx, t.GetDestination(), t, body)
+	_, err := reply(replyCtx, t.GetDestination(), t, body)
 	if errors.Is(err, plugin.ErrInvalid) && short != "" && short != body {
-		_, err = r.reply(replyCtx, t.GetDestination(), t, short)
+		_, err = reply(replyCtx, t.GetDestination(), t, short)
 	}
 	switch {
 	case errors.Is(err, plugin.ErrNoFormat):
-		slog.Debug("ZIP Weather: the hub has no usable text format for the reply", "incoming_format", t.GetFormat())
+		slog.Warn("ZIP Weather: the hub has no usable text format for the reply", "text_id", t.GetId(), "radio", t.GetSource(), "incoming_format", t.GetFormat())
 	case err != nil:
 		slog.Warn("ZIP Weather: reply failed", "text_id", t.GetId(), "error", err)
 	}
