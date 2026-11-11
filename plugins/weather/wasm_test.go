@@ -116,13 +116,12 @@ func TestUploadableTextReplies(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				// A confirmed radio packet must work without a hub text event.
+				assertFullETSIReply(t, stream.Recv, incoming)
+				return
 			}
 			if err := stream.Send(&pluginv1.ConnectResponse{Message: &pluginv1.ConnectResponse_Text{Text: incoming}}); err != nil {
 				t.Fatal(err)
-			}
-			if tt.compressed {
-				assertFullETSIReply(t, stream.Recv, incoming)
-				return
 			}
 			request, err := stream.Recv()
 			if err != nil {
@@ -142,7 +141,7 @@ func TestUploadableTextReplies(t *testing.T) {
 
 func compressedRequestBursts(t *testing.T, text *pluginv1.Text) []*pluginv1.Burst {
 	t.Helper()
-	header, err := (pdu.UnconfirmedDataHeader{
+	header, err := (pdu.ConfirmedDataHeader{
 		SAP: enums.SAPUDPIPHeaderCompression, LLIDSource: text.GetSource(),
 		LLIDDestination: text.GetDestination(), FullMessageFlag: true,
 	}).DataHeader()
@@ -155,13 +154,31 @@ func compressedRequestBursts(t *testing.T, text *pluginv1.Text) []*pluginv1.Burs
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := data.Message{Header: header, Rate: enums.DataTypeRate12, Payload: payload}
-	bursts, err := etsiBursts(message, text.GetSource(), text.GetDestination(), text.GetSlot(), 7)
+	tx, err := data.NewSender(&data.SenderConfig{ColorCode: 7, Source: layer2.SyncSourceMS, Slot: enums.Slot2})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, b := range bursts {
-		b.Repeater = text.GetRepeater()
+	message := data.Message{Header: header, Rate: enums.DataTypeRate12, Payload: payload}
+	if err := tx.Send(0, &message); err != nil {
+		t.Fatal(err)
+	}
+	var bursts []*pluginv1.Burst
+	var outputs []data.Output
+	for at := time.Duration(0); at < 3*time.Second && tx.State() != data.SenderWaitResponse; at += plugin.BurstTime {
+		outputs = tx.Tick(at, outputs[:0])
+		for _, out := range outputs {
+			if out.Kind == data.OutputBurst {
+				bursts = append(bursts, &pluginv1.Burst{
+					Source: text.GetSource(), Destination: text.GetDestination(), Repeater: text.GetRepeater(),
+					Slot: text.GetSlot(), StreamId: 44, FrameType: pluginv1.FrameType_FRAME_TYPE_DATA_SYNC,
+					DataTypeOrVoiceSequence: uint32(out.Hint.DataType), Sequence: uint32(len(bursts)),
+					Payload: append([]byte(nil), out.Burst[:]...),
+				})
+			}
+		}
+	}
+	if tx.State() != data.SenderWaitResponse || len(bursts) == 0 {
+		t.Fatal("no confirmed request was sent")
 	}
 	return bursts
 }
