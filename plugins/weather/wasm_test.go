@@ -75,10 +75,12 @@ func TestUploadableTextReplies(t *testing.T) {
 		name       string
 		exactReply bool
 		compressed bool
+		voiceCall  bool
 	}{
 		{name: "v1.3.28"},
 		{name: "v1.3.29 or newer", exactReply: true},
 		{name: "compressed ETSI IP", exactReply: true, compressed: true},
+		{name: "private voice call", voiceCall: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
@@ -109,6 +111,29 @@ func TestUploadableTextReplies(t *testing.T) {
 
 			// An invalid ZIP exercises the reply path without contacting a provider.
 			incoming := &pluginv1.Text{Id: 12, Source: 1234567, Destination: 5060, Repeater: 11, Slot: 2, Body: "hello"}
+			if tt.voiceCall {
+				for _, group := range []bool{true, false} {
+					source := incoming.GetSource()
+					if group {
+						source++
+					}
+					bursts, err := plugin.VoiceBursts(plugin.VoiceCall{
+						Source: source, Destination: incoming.GetDestination(), Group: group,
+						Slot: incoming.GetSlot(), Stream: 42, ColorCode: 7,
+					}, [][9]byte{{}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, b := range bursts {
+						b.Repeater = incoming.GetRepeater()
+						if err := stream.Send(&pluginv1.ConnectResponse{Message: &pluginv1.ConnectResponse_Burst{Burst: b}}); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				assertFullETSIReply(t, stream.Recv, incoming, "Please reply with your ZIP code")
+				return
+			}
 			if tt.compressed {
 				incoming.Format = sms.FormatIP.String()
 				for _, b := range compressedRequestBursts(t, incoming) {
@@ -117,7 +142,7 @@ func TestUploadableTextReplies(t *testing.T) {
 					}
 				}
 				// A confirmed radio packet must work without a hub text event.
-				assertFullETSIReply(t, stream.Recv, incoming)
+				assertFullETSIReply(t, stream.Recv, incoming, "Send a 5-digit US ZIP code.")
 				return
 			}
 			if err := stream.Send(&pluginv1.ConnectResponse{Message: &pluginv1.ConnectResponse_Text{Text: incoming}}); err != nil {
@@ -183,7 +208,7 @@ func compressedRequestBursts(t *testing.T, text *pluginv1.Text) []*pluginv1.Burs
 	return bursts
 }
 
-func assertFullETSIReply(t *testing.T, recv func() (*pluginv1.ConnectRequest, error), incoming *pluginv1.Text) {
+func assertFullETSIReply(t *testing.T, recv func() (*pluginv1.ConnectRequest, error), incoming *pluginv1.Text, want string) {
 	t.Helper()
 	rx, err := data.NewReceiver(&data.ReceiverConfig{Address: incoming.GetSource(), Lost: -1})
 	if err != nil {
@@ -195,7 +220,7 @@ func assertFullETSIReply(t *testing.T, recv func() (*pluginv1.ConnectRequest, er
 			t.Fatal(err)
 		}
 		b := frame.GetBurst()
-		if b.GetSource() != incoming.GetDestination() || b.GetDestination() != incoming.GetSource() || b.GetSlot() != incoming.GetSlot() {
+		if b.GetSource() != incoming.GetDestination() || b.GetDestination() != incoming.GetSource() || b.GetSlot() != incoming.GetSlot() || b.GetGroupCall() {
 			t.Fatalf("unexpected private reply burst: %v", frame)
 		}
 		d := plugin.DataOf(b)
@@ -213,7 +238,7 @@ func assertFullETSIReply(t *testing.T, recv func() (*pluginv1.ConnectRequest, er
 				t.Fatalf("expected full ETSI IP SAP, got %v", sap)
 			}
 			body, text, err := sms.Decode(nil, &e.Message.Header, e.Message.Payload)
-			if err != nil || text.Format != sms.FormatIP || string(body) != "Send a 5-digit US ZIP code." {
+			if err != nil || text.Format != sms.FormatIP || string(body) != want {
 				t.Fatalf("unexpected ETSI IP text: %q, %v, %v", body, text.Format, err)
 			}
 			return

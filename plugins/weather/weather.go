@@ -33,6 +33,8 @@ import (
 
 	"github.com/USA-RedDragon/DMRHub/sdk/plugin"
 	pluginv1 "github.com/USA-RedDragon/DMRHub/sdk/plugin/v1"
+	"github.com/USA-RedDragon/dmrgo/v2/enums"
+	"github.com/USA-RedDragon/dmrgo/v2/layer2"
 )
 
 const (
@@ -41,14 +43,15 @@ const (
 	requestWait  = 4 * time.Second
 	replyWait    = 15 * time.Second
 	duplicateTTL = 10 * time.Minute
+	zipPrompt    = "Please reply with your ZIP code"
 )
 
 // Hello describes the weather plugin. The hub admin assigns its DMR ID.
 func Hello() *pluginv1.Hello {
 	return &pluginv1.Hello{
 		Name:        "ZIP Weather",
-		Version:     "0.1.3",
-		Description: "Replies to a private DMR text containing a five-digit U.S. ZIP code with current weather observations.",
+		Version:     "0.1.4",
+		Description: "Replies to a private DMR text with current weather for a five-digit U.S. ZIP code. A private voice call gets a text asking for the ZIP code.",
 		Hosts: []*pluginv1.Host{
 			{Address: zipAPIHost + ":443", Reason: "Looks up the coordinates of a U.S. ZIP code."},
 			{Address: nwsAPIHost + ":443", Reason: "Gets nearby National Weather Service observations."},
@@ -65,7 +68,7 @@ type responder struct {
 	etsi   *etsiReplies
 }
 
-// Serve subscribes to private text requests and answers through the hub.
+// Serve answers private text requests and private voice calls through the hub.
 func Serve(ctx context.Context, conn *plugin.Conn) error {
 	if conn.Has(pluginv1.Feature_FEATURE_TEXTS) {
 		if err := conn.Subscribe(&pluginv1.Subscribe{Texts: true}); err != nil {
@@ -116,31 +119,56 @@ func (r responder) receive(ctx context.Context, recv func() (*pluginv1.ConnectRe
 	}()
 
 	active := make(chan struct{}, maxPending)
-	dispatch := func(t *pluginv1.Text, reply textReply) bool {
+	dispatch := func(radio uint32, work func()) bool {
 		select {
 		case active <- struct{}{}:
 			pending.Go(func() {
 				defer func() { <-active }()
-				r.answerWith(ctx, t, reply)
+				work()
 			})
 			return true
 		default:
-			slog.Warn("ZIP Weather: all workers busy", "radio", t.GetSource())
+			slog.Warn("ZIP Weather: all workers busy", "radio", radio)
 			return false
 		}
 	}
 	seen := make(map[uint64]time.Time)
+	type voiceCall struct{ source, destination, stream uint32 }
+	called := make(map[voiceCall]time.Time)
 	var pruneAt time.Time
 	for {
 		message, err := recv()
 		if err != nil {
-			return fmt.Errorf("receive weather text: %w", err)
+			return fmt.Errorf("receive weather request: %w", err)
+		}
+		now := time.Now()
+		if !now.Before(pruneAt) {
+			for id, expires := range seen {
+				if !now.Before(expires) {
+					delete(seen, id)
+				}
+			}
+			for call, expires := range called {
+				if !now.Before(expires) {
+					delete(called, call)
+				}
+			}
+			pruneAt = now.Add(time.Minute)
 		}
 		if b := message.GetBurst(); b != nil && r.etsi != nil {
-			if t, cc := r.etsi.observe(b); t != nil {
+			if plugin.IsTerminator(b) {
+				call := voiceCall{b.GetSource(), b.GetDestination(), b.GetStreamId()}
+				if t, cc := voicePromptRoute(b, now); t != nil && !now.Before(called[call]) {
+					if dispatch(t.GetSource(), func() { r.promptCaller(ctx, t, cc) }) {
+						called[call] = now.Add(duplicateTTL)
+					}
+				}
+			} else if t, cc := r.etsi.observe(b); t != nil {
 				slog.Info("ZIP Weather: decoded compressed ETSI IP request", "radio", t.GetSource(), "repeater", t.GetRepeater(), "slot", t.GetSlot())
-				dispatch(t, func(ctx context.Context, source uint32, text *pluginv1.Text, body string) (string, error) {
-					return r.etsi.reply(ctx, source, text, body, cc)
+				dispatch(t.GetSource(), func() {
+					r.answerWith(ctx, t, func(ctx context.Context, source uint32, text *pluginv1.Text, body string) (string, error) {
+						return r.etsi.reply(ctx, source, text, body, cc)
+					})
 				})
 			}
 			continue
@@ -154,15 +182,6 @@ func (r responder) receive(ctx context.Context, recv func() (*pluginv1.ConnectRe
 			continue
 		}
 
-		now := time.Now()
-		if !now.Before(pruneAt) {
-			for id, expires := range seen {
-				if !now.Before(expires) {
-					delete(seen, id)
-				}
-			}
-			pruneAt = now.Add(time.Minute)
-		}
 		if now.Before(seen[t.GetId()]) {
 			continue
 		}
@@ -171,9 +190,33 @@ func (r responder) receive(ctx context.Context, recv func() (*pluginv1.ConnectRe
 			continue
 		}
 		slog.Info("ZIP Weather: received hub text", "text_id", t.GetId(), "radio", t.GetSource(), "format", t.GetFormat(), "slot", t.GetSlot())
-		if dispatch(t, r.replyHubText) {
+		if dispatch(t.GetSource(), func() { r.answerWith(ctx, t, r.replyHubText) }) {
 			seen[t.GetId()] = now.Add(duplicateTTL)
 		}
+	}
+}
+
+func voicePromptRoute(b *pluginv1.Burst, now time.Time) (*pluginv1.Text, enums.ColorCode) {
+	if b.GetGroupCall() || b.GetSource() == 0 || b.GetDestination() == 0 || b.GetRepeater() == 0 || b.GetStreamId() == 0 ||
+		(b.GetSlot() != 1 && b.GetSlot() != 2) || len(b.GetPayload()) != len(layer2.RawBurst{}) {
+		return nil, 0
+	}
+	raw := layer2.RawBurst(b.GetPayload())
+	slotType := raw.SlotType()
+	if slotType.DataType != enums.DataTypeTerminatorWithLC {
+		return nil, 0
+	}
+	return &pluginv1.Text{
+		Source: b.GetSource(), Destination: b.GetDestination(), Repeater: b.GetRepeater(), Slot: b.GetSlot(), At: now.UnixMilli(),
+	}, slotType.ColorCode
+}
+
+func (r responder) promptCaller(ctx context.Context, t *pluginv1.Text, cc enums.ColorCode) {
+	slog.Info("ZIP Weather: private voice call ended", "radio", t.GetSource(), "slot", t.GetSlot())
+	ctx, cancel := context.WithTimeout(ctx, replyWait)
+	defer cancel()
+	if _, err := r.etsi.reply(ctx, t.GetDestination(), t, zipPrompt, cc); err != nil {
+		slog.Warn("ZIP Weather: could not send the ZIP prompt", "radio", t.GetSource(), "error", err)
 	}
 }
 

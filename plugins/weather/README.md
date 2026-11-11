@@ -2,6 +2,8 @@
 
 Send a private DMR text containing a five-digit U.S. ZIP code, such as `29401`, to the plugin's DMR ID. The plugin replies to the sending radio. An example reply is `29401 68F Partly Cloudy RH 60% Wind 10 mph 1835Z`. The time is the UTC time of the station reading. Humidity and wind appear when the station reports them.
 
+If you make a private voice call to the plugin's DMR ID, release PTT to receive a full ETSI IP text saying `Please reply with your ZIP code`. Send the ZIP as a private text to the same ID.
+
 ## Upload to DMRHub
 
 Download the **dmrhub-weather-wasm** artifact from a successful **Package ZIP Weather** workflow run and extract `dmrhub-weather.wasm`. To build the same file from the repository root, run:
