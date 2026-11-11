@@ -88,12 +88,6 @@ type Texts interface {
 	ReplyText(ctx context.Context, source uint, id uint64, radio uint, body string) (string, error)
 }
 
-// pluginTextReplier can choose a reply format from the plugin's settings
-// for the owner of the receiving radio.
-type pluginTextReplier interface {
-	ReplyTextForPlugin(ctx context.Context, plugin, source uint, id uint64, radio uint, body string) (string, error)
-}
-
 // The errors of Prompts.PlayPrompt.
 var (
 	// ErrRadioNotFound is returned when the hub does not know where to
@@ -509,11 +503,7 @@ func (q *requester) sendText(ctx context.Context, t *pluginv1.SendText, ranges [
 		if q.s.prompts == nil {
 			return fail(pluginv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "this hub does not answer a text in its own format")
 		}
-		if replies, ok := q.s.texts.(pluginTextReplier); ok {
-			format, err = replies.ReplyTextForPlugin(ctx, q.p.ID, source, t.GetReplyTo(), radio, t.GetBody())
-		} else {
-			format, err = q.s.texts.ReplyText(ctx, source, t.GetReplyTo(), radio, t.GetBody())
-		}
+		format, err = q.s.texts.ReplyText(ctx, source, t.GetReplyTo(), radio, t.GetBody())
 	} else {
 		format, err = q.s.texts.SendText(ctx, source, radio, t.GetBody())
 	}
