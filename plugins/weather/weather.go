@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -48,6 +49,10 @@ func Hello() *pluginv1.Hello {
 		Name:        "ZIP Weather",
 		Version:     "0.1.0",
 		Description: "Replies to a private DMR text containing a five-digit U.S. ZIP code with current weather observations.",
+		Hosts: []*pluginv1.Host{
+			{Address: zipAPIHost + ":443", Reason: "Looks up the coordinates of a U.S. ZIP code."},
+			{Address: nwsAPIHost + ":443", Reason: "Gets nearby National Weather Service observations."},
+		},
 	}
 }
 
@@ -70,10 +75,19 @@ func Serve(ctx context.Context, conn *plugin.Conn) error {
 
 	client := &http.Client{
 		Timeout: requestWait,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
+				return conn.Dial(ctx, address)
+			},
+			// Two connections per host stay within the four-connection sandbox limit.
+			MaxConnsPerHost: 2,
+			IdleConnTimeout: 30 * time.Second,
+		},
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+	defer client.CloseIdleConnections()
 	r := responder{lookup: weatherAPI{client: client}.lookup, reply: conn.ReplyText}
 	return r.receive(ctx, conn.Recv)
 }
