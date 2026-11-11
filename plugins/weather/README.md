@@ -24,7 +24,9 @@ Remove-Item Env:GOOS, Env:GOARCH
 3. Enter one free DMR ID, select both requested HTTPS hosts, and click **Upload and start**.
 4. Send `29401` as a private text to that ID from a radio on the owner's hotspot or an admin-trusted repeater.
 
-DMRHub uses the original text's format, timeslot, and repeater for the reply. The hub can reply only in formats it can reproduce, which excludes UDT.
+ZIP Weather needs DMRHub v1.3.28 or newer. With v1.3.29 or newer, DMRHub uses the original text's format, timeslot, and repeater for the reply. On v1.3.28, the hub uses the radio's latest supported text from its owner's hotspot or an admin-trusted repeater to choose the reply format and route. Use a supported text format such as TMS for the test.
+
+To update an existing installation, open **ZIP Weather** under **Admin > Plugins** and select **Upload a new version**. This keeps its assigned DMR ID and host permissions.
 
 ## Run as a separate program
 
