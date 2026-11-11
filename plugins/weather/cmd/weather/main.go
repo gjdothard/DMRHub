@@ -17,9 +17,7 @@
 //
 // The source code is available at <https://github.com/USA-RedDragon/DMRHub>
 
-//go:build !wasip1
-
-// Command weather runs the ZIP Weather DMRHub plugin as a separate program.
+// Command weather runs the ZIP Weather DMRHub plugin inside or alongside DMRHub.
 package main
 
 import (
