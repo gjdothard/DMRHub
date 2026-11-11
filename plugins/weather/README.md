@@ -24,9 +24,21 @@ Remove-Item Env:GOOS, Env:GOARCH
 3. Enter one free DMR ID, select both requested HTTPS hosts, and click **Upload and start**.
 4. Send `29401` as a private text to that ID from a radio on the owner's hotspot or an admin-trusted repeater.
 
-ZIP Weather needs DMRHub v1.3.28 or newer. With v1.3.29 or newer, DMRHub uses the original text's format, timeslot, and repeater for the reply. On v1.3.28, the hub uses the radio's latest supported text from its owner's hotspot or an admin-trusted repeater to choose the reply format and route. Use a supported text format such as TMS for the test.
+ZIP Weather accepts a five-digit ZIP from any private text that DMRHub can decode and deliver to a plugin. By default, DMRHub v1.3.29 and newer attempt to reply in the incoming text's format. DMRHub v1.3.28 uses the radio's latest reproducible text instead.
+
+With ZIP Weather v0.1.2 and the updated DMRHub server from this branch, enable **Full ETSI IP weather replies** in your DMRHub account's **Settings**. The hub then replies in full ETSI IP on the request's repeater and timeslot, including when the incoming ZIP was sent in compressed ETSI IP or another decoded format. Enable the option only if the radios on that account can receive full ETSI IP. The request must come through your own hotspot or an admin-trusted repeater.
 
 To update an existing installation, open **ZIP Weather** under **Admin > Plugins** and select **Upload a new version**. This keeps its assigned DMR ID and host permissions.
+
+### Use the updated server in Docker Compose
+
+For a Linux x86-64 server, extract `DMRHub` from the workflow's **dmrhub-server-linux-amd64** artifact next to the Compose file and set its executable bit with `chmod 0755 DMRHub`. Add the following entry to the existing DMRHub service's `volumes` list:
+
+```yaml
+- ./DMRHub:/app/DMRHub:ro
+```
+
+Keep the existing data and configuration mounts. Recreate only the DMRHub service with `docker compose up -d --no-deps <service>`. Remove the binary mount and recreate the service to revert to the image's server binary.
 
 ## Run as a separate program
 
