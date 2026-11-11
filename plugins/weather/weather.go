@@ -47,12 +47,18 @@ const (
 func Hello() *pluginv1.Hello {
 	return &pluginv1.Hello{
 		Name:        "ZIP Weather",
-		Version:     "0.1.1",
+		Version:     "0.1.2",
 		Description: "Replies to a private DMR text containing a five-digit U.S. ZIP code with current weather observations.",
 		Hosts: []*pluginv1.Host{
 			{Address: zipAPIHost + ":443", Reason: "Looks up the coordinates of a U.S. ZIP code."},
 			{Address: nwsAPIHost + ":443", Reason: "Gets nearby National Weather Service observations."},
 		},
+		Switches: []*pluginv1.Switch{{
+			Key:         plugin.FullETSIIPReplySwitch,
+			Title:       "Full ETSI IP weather replies",
+			Description: "Use full ETSI IP for ZIP Weather replies regardless of the incoming text format.",
+			Notice:      "Enable only if all radios on your account can receive full ETSI IP texts.",
+		}},
 	}
 }
 
