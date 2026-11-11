@@ -47,7 +47,7 @@ const (
 func Hello() *pluginv1.Hello {
 	return &pluginv1.Hello{
 		Name:        "ZIP Weather",
-		Version:     "0.1.0",
+		Version:     "0.1.1",
 		Description: "Replies to a private DMR text containing a five-digit U.S. ZIP code with current weather observations.",
 		Hosts: []*pluginv1.Host{
 			{Address: zipAPIHost + ":443", Reason: "Looks up the coordinates of a U.S. ZIP code."},
@@ -66,8 +66,14 @@ type responder struct {
 
 // Serve subscribes to private text requests and answers through the hub.
 func Serve(ctx context.Context, conn *plugin.Conn) error {
-	if !conn.Has(pluginv1.Feature_FEATURE_TEXTS) || !conn.Has(pluginv1.Feature_FEATURE_PROMPT) {
-		return fmt.Errorf("ZIP Weather needs the hub's text and reply features: %w", plugin.ErrUnsupported)
+	if !conn.Has(pluginv1.Feature_FEATURE_TEXTS) ||
+		(!conn.Has(pluginv1.Feature_FEATURE_PROMPT) && !conn.Has(pluginv1.Feature_FEATURE_SEND_TEXT)) {
+		slog.Warn("ZIP Weather: the hub does not support receiving and sending plugin texts; use DMRHub v1.3.28 or newer")
+		for {
+			if _, err := conn.Recv(); err != nil {
+				return fmt.Errorf("receive from hub: %w", err)
+			}
+		}
 	}
 	if err := conn.Subscribe(&pluginv1.Subscribe{Texts: true}); err != nil {
 		return fmt.Errorf("subscribe to weather texts: %w", err)
@@ -88,7 +94,17 @@ func Serve(ctx context.Context, conn *plugin.Conn) error {
 		},
 	}
 	defer client.CloseIdleConnections()
-	r := responder{lookup: weatherAPI{client: client}.lookup, reply: conn.ReplyText}
+	r := responder{
+		lookup: weatherAPI{client: client}.lookup,
+		reply: func(ctx context.Context, source uint32, t *pluginv1.Text, body string) (string, error) {
+			if conn.Has(pluginv1.Feature_FEATURE_PROMPT) {
+				return conn.ReplyText(ctx, source, t, body)
+			}
+			// Older hubs choose the format and route from the radio's last
+			// supported text through an owned or trusted repeater.
+			return conn.SendText(ctx, source, t.GetSource(), body)
+		},
+	}
 	return r.receive(ctx, conn.Recv)
 }
 
@@ -169,7 +185,7 @@ func (r responder) answer(ctx context.Context, t *pluginv1.Text) {
 	}
 	switch {
 	case errors.Is(err, plugin.ErrNoFormat):
-		slog.Debug("ZIP Weather: hub cannot reply in the incoming format", "format", t.GetFormat())
+		slog.Debug("ZIP Weather: the hub has no usable text format for the reply", "incoming_format", t.GetFormat())
 	case err != nil:
 		slog.Warn("ZIP Weather: reply failed", "text_id", t.GetId(), "error", err)
 	}
