@@ -50,6 +50,10 @@ type weatherAPI struct {
 	client *http.Client
 }
 
+type upstreamStatus int
+
+func (s upstreamStatus) Error() string { return fmt.Sprintf("upstream returned HTTP %d", s) }
+
 type zipPlace struct {
 	Latitude  string `json:"latitude"`
 	Longitude string `json:"longitude"`
@@ -125,6 +129,8 @@ func (a weatherAPI) lookupPoint(ctx context.Context, lat, lon float64) (observat
 		return observation{}, err
 	}
 
+	var stationErr error
+	var receivedObservation bool
 	for _, station := range stations.Features[:min(maxStationChecks, len(stations.Features))] {
 		id := station.Properties.ID
 		if id == "" {
@@ -138,11 +144,16 @@ func (a weatherAPI) lookupPoint(ctx context.Context, lat, lon float64) (observat
 			if ctx.Err() != nil {
 				return observation{}, err
 			}
+			stationErr = err
 			continue
 		}
+		receivedObservation = true
 		if latest.Properties.usable(time.Now()) {
 			return latest.Properties, nil
 		}
+	}
+	if !receivedObservation && stationErr != nil {
+		return observation{}, stationErr
 	}
 	return observation{}, errNoObservation
 }
@@ -166,7 +177,7 @@ func (a weatherAPI) get(ctx context.Context, endpoint string, target any) error 
 		return errHTTPNotFound
 	}
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s returned HTTP %d", req.URL.Host, res.StatusCode)
+		return upstreamStatus(res.StatusCode)
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseBytes)).Decode(target); err != nil {
 		return fmt.Errorf("decode %s: %w", req.URL.Host, err)

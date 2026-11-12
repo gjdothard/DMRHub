@@ -22,11 +22,13 @@ package weather
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -51,7 +53,7 @@ const (
 func Hello() *pluginv1.Hello {
 	return &pluginv1.Hello{
 		Name:        "ZIP Weather",
-		Version:     "0.1.5",
+		Version:     "0.1.6",
 		Description: "Replies to a private DMR text with weather for a five-digit U.S. ZIP code. After a private call, sends local weather if a recent position is available, or asks for a ZIP code.",
 		Hosts: []*pluginv1.Host{
 			{Address: zipAPIHost + ":443", Reason: "Looks up the coordinates of a U.S. ZIP code."},
@@ -122,9 +124,16 @@ func Serve(ctx context.Context, conn *plugin.Conn) error {
 		r.local = func(ctx context.Context, radio uint32) (observation, error) {
 			lat, lon, err := positions.latest(ctx, radio)
 			if err != nil {
+				if !errors.Is(err, errNoPosition) {
+					logLocationFailure(radio, "dmrhub_positions", err)
+				}
 				return observation{}, err
 			}
-			return api.lookupPoint(ctx, lat, lon)
+			obs, err := api.lookupPoint(ctx, lat, lon)
+			if err != nil {
+				logLocationFailure(radio, "nws", err)
+			}
+			return obs, err
 		}
 	}
 	return r.receive(ctx, conn.Recv)
@@ -252,14 +261,41 @@ func (r responder) voiceReply(ctx context.Context, radio uint32) string {
 	defer cancel()
 	obs, err := r.local(ctx, radio)
 	if err != nil {
-		if !errors.Is(err, errNoPosition) && !errors.Is(err, errHTTPNotFound) {
-			// Provider errors can include the coordinates in the request URL.
-			slog.Warn("ZIP Weather: location-based weather unavailable", "radio", radio)
-		}
 		return zipPrompt
 	}
 	body, _ := obs.messages("Local WX")
 	return body
+}
+
+// Log only a reason and stage. Transport errors can include the lookup URL
+// and therefore the radio's GPS coordinates.
+func logLocationFailure(radio uint32, stage string, err error) {
+	slog.Warn("ZIP Weather: location-based weather unavailable", "radio", radio, "stage", stage, "reason", locationFailureReason(err))
+}
+
+func locationFailureReason(err error) string {
+	var status upstreamStatus
+	var certErr *tls.CertificateVerificationError
+	var dnsErr *net.DNSError
+	var requestErr *url.Error
+	switch {
+	case errors.As(err, &status):
+		return status.Error()
+	case errors.Is(err, errHTTPNotFound):
+		return "upstream returned HTTP 404"
+	case errors.Is(err, errNoObservation):
+		return "no recent observation from nearby stations"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "request timed out"
+	case errors.As(err, &certErr):
+		return "TLS certificate verification failed"
+	case errors.As(err, &dnsErr):
+		return "DNS lookup failed"
+	case errors.As(err, &requestErr):
+		return "HTTP connection failed"
+	default:
+		return "invalid upstream response"
+	}
 }
 
 func (r responder) replyHubText(ctx context.Context, source uint32, t *pluginv1.Text, body string) (string, error) {

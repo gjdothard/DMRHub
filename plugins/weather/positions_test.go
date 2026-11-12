@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -76,5 +77,22 @@ func TestVoiceReplyFromPosition(t *testing.T) {
 	r.local = func(context.Context, uint32) (observation, error) { return observation{}, errNoPosition }
 	if got := r.voiceReply(t.Context(), radio); got != zipPrompt {
 		t.Fatalf("unexpected missing-position reply: %q", got)
+	}
+}
+
+func TestLocationFailureReason(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		err  error
+		want string
+	}{
+		{upstreamStatus(http.StatusUnauthorized), "upstream returned HTTP 401"},
+		{errNoObservation, "no recent observation from nearby stations"},
+		{&url.Error{URL: "https://weather.example/points/32.9,-80", Err: context.DeadlineExceeded}, "request timed out"},
+		{&url.Error{URL: "https://weather.example/points/32.9,-80", Err: errors.New("failed")}, "HTTP connection failed"},
+	} {
+		if got := locationFailureReason(tt.err); got != tt.want {
+			t.Errorf("got %q, want %q", got, tt.want)
+		}
 	}
 }

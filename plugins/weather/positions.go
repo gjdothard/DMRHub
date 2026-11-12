@@ -65,7 +65,7 @@ func (a positionAPI) latest(ctx context.Context, radio uint32) (float64, float64
 		return 0, 0, errNoPosition
 	}
 	if res.StatusCode != http.StatusOK {
-		return 0, 0, fmt.Errorf("positions API returned HTTP %d", res.StatusCode)
+		return 0, 0, upstreamStatus(res.StatusCode)
 	}
 	var response struct {
 		Latest *struct {
