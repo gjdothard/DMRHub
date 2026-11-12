@@ -2,7 +2,7 @@
 
 Send a private DMR text containing a five-digit U.S. ZIP code, such as `29401`, to the plugin's DMR ID. The plugin replies to the sending radio. An example reply is `29401 68F Partly Cloudy RH 60% Wind 10 mph 1835Z`. The time is the UTC time of the station reading. Humidity and wind appear when the station reports them.
 
-If you make a private voice call to the plugin's DMR ID, release PTT to receive a full ETSI IP text saying `Please reply with your ZIP code`. Send the ZIP as a private text to the same ID.
+Make a private voice call to the plugin's DMR ID and release PTT. When location weather is configured, ZIP Weather uses the calling radio's last DMRHub position to send current conditions. Otherwise it sends `Please reply with your ZIP code`. Send the ZIP as a private text to the same ID. Voice-call replies use full ETSI IP.
 
 ## Upload to DMRHub
 
@@ -40,9 +40,20 @@ Build with `go build -o dmrhub-weather ./plugins/weather/cmd/weather` (use `dmrh
 
 Omit the fingerprint when the listener uses a certificate from a trusted CA.
 
+### Weather from the existing Location plugin
+
+This option runs ZIP Weather as a separate program and uses the existing DMRHub Positions API. The built-in Location plugin continues collecting fixes as usual.
+
+1. Create a personal token in **Settings > API tokens**. Select **Only what I pick** and grant `positions:read`. The token can read positions for the account's radios and radios shared with that account.
+2. Set `ZIP_WEATHER_HUB_URL` to the hub's HTTPS web address and `ZIP_WEATHER_POSITIONS_TOKEN` to the personal API token in the external program's environment. Keep the separate `DMRHUB_PLUGIN_TOKEN` for the plugin listener connection.
+3. If replacing an uploaded ZIP Weather instance, turn that instance off before assigning its ID to the external instance. Start the external program using the listener address and fingerprint from its plugin page.
+4. Make a private voice call to ZIP Weather from a radio whose recent fix is visible on **Positions**. The program uses a fix up to two hours old. A missing, stale or inaccessible fix or a failed weather lookup produces the ZIP prompt.
+
+The **dmrhub-weather-linux** workflow artifact contains Linux executables for amd64 and arm64. Use the binary for the host running the external plugin, or build from source as above.
+
 ## Weather data
 
-The plugin uses outbound HTTPS to `api.zippopotam.us` and `api.weather.gov` without a weather API key. Zippopotam.us receives the ZIP code, and NWS receives the resulting coordinates and requests for nearby station observations. The provider requests contain no radio ID or callsign. The plugin checks up to three nearby stations and uses a reading at most two hours old. If it cannot find a usable observation, the radio receives a weather-unavailable reply.
+The plugin uses outbound HTTPS to `api.zippopotam.us` and `api.weather.gov` without a weather API key. Zippopotam.us receives the ZIP code for ZIP requests. NWS receives the lookup coordinates, including the radio's last fix for location requests, and requests for nearby station observations. The weather providers receive no radio ID or callsign. The plugin checks up to three nearby stations and uses a reading at most two hours old. For a ZIP request with no usable observation, the radio receives a weather-unavailable reply.
 
 - [DMRHub plugin administration](../../doc/admin/plugins.md)
 - [Zippopotam.us postal-code lookup](https://docs.zippopotam.us/docs/v1/)

@@ -86,10 +86,17 @@ func (a weatherAPI) lookup(ctx context.Context, zip string) (observation, error)
 	place := location.Places[0]
 	lat, latErr := strconv.ParseFloat(place.Latitude, 64)
 	lon, lonErr := strconv.ParseFloat(place.Longitude, 64)
-	if latErr != nil || lonErr != nil || !(lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
+	if latErr != nil || lonErr != nil || !validCoordinates(lat, lon) {
 		return observation{}, errors.New("invalid ZIP coordinates")
 	}
+	return a.lookupPoint(ctx, lat, lon)
+}
 
+func validCoordinates(lat, lon float64) bool {
+	return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180
+}
+
+func (a weatherAPI) lookupPoint(ctx context.Context, lat, lon float64) (observation, error) {
 	var point struct {
 		Properties struct {
 			StationsURL string `json:"observationStations"`
@@ -174,9 +181,9 @@ func (o observation) usable(now time.Time) bool {
 		*o.Temperature.Value >= -100 && *o.Temperature.Value <= 70
 }
 
-func (o observation) messages(zip string) (full, short string) {
+func (o observation) messages(label string) (full, short string) {
 	fahrenheit := *o.Temperature.Value*9/5 + 32
-	short = fmt.Sprintf("%s %.0fF", zip, fahrenheit)
+	short = fmt.Sprintf("%s %.0fF", label, fahrenheit)
 	condition := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
 		if r < ' ' || r > '~' {
 			return ' '

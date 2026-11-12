@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -50,8 +51,8 @@ const (
 func Hello() *pluginv1.Hello {
 	return &pluginv1.Hello{
 		Name:        "ZIP Weather",
-		Version:     "0.1.4",
-		Description: "Replies to a private DMR text with current weather for a five-digit U.S. ZIP code. A private voice call gets a text asking for the ZIP code.",
+		Version:     "0.1.5",
+		Description: "Replies to a private DMR text with weather for a five-digit U.S. ZIP code. After a private call, sends local weather if a recent position is available, or asks for a ZIP code.",
 		Hosts: []*pluginv1.Host{
 			{Address: zipAPIHost + ":443", Reason: "Looks up the coordinates of a U.S. ZIP code."},
 			{Address: nwsAPIHost + ":443", Reason: "Gets nearby National Weather Service observations."},
@@ -66,10 +67,18 @@ type responder struct {
 	lookup weatherLookup
 	reply  textReply
 	etsi   *etsiReplies
+	local  func(context.Context, uint32) (observation, error)
 }
 
 // Serve answers private text requests and private voice calls through the hub.
 func Serve(ctx context.Context, conn *plugin.Conn) error {
+	positions, err := newPositionAPI(os.Getenv("ZIP_WEATHER_HUB_URL"), os.Getenv("ZIP_WEATHER_POSITIONS_TOKEN"))
+	if err != nil {
+		return err
+	}
+	if positions != nil {
+		defer positions.client.CloseIdleConnections()
+	}
 	if conn.Has(pluginv1.Feature_FEATURE_TEXTS) {
 		if err := conn.Subscribe(&pluginv1.Subscribe{Texts: true}); err != nil {
 			return fmt.Errorf("subscribe to weather texts: %w", err)
@@ -77,7 +86,8 @@ func Serve(ctx context.Context, conn *plugin.Conn) error {
 	} else {
 		slog.Warn("ZIP Weather: hub text events unavailable; listening for compressed ETSI IP bursts")
 	}
-	slog.Info("ZIP Weather: ready", "text_events", conn.Has(pluginv1.Feature_FEATURE_TEXTS), "exact_replies", conn.Has(pluginv1.Feature_FEATURE_PROMPT))
+	slog.Info("ZIP Weather: ready", "text_events", conn.Has(pluginv1.Feature_FEATURE_TEXTS),
+		"exact_replies", conn.Has(pluginv1.Feature_FEATURE_PROMPT), "positions", positions != nil)
 
 	client := &http.Client{
 		Timeout: requestWait,
@@ -94,9 +104,10 @@ func Serve(ctx context.Context, conn *plugin.Conn) error {
 		},
 	}
 	defer client.CloseIdleConnections()
+	api := weatherAPI{client: client}
 	etsi := &etsiReplies{links: make(map[airRoute]*airLink), send: conn.Send, busy: make(chan struct{}, 1)}
 	r := responder{
-		lookup: weatherAPI{client: client}.lookup,
+		lookup: api.lookup,
 		etsi:   etsi,
 		reply: func(ctx context.Context, source uint32, t *pluginv1.Text, body string) (string, error) {
 			if conn.Has(pluginv1.Feature_FEATURE_PROMPT) {
@@ -106,6 +117,15 @@ func Serve(ctx context.Context, conn *plugin.Conn) error {
 			// supported text through an owned or trusted repeater.
 			return conn.SendText(ctx, source, t.GetSource(), body)
 		},
+	}
+	if positions != nil {
+		r.local = func(ctx context.Context, radio uint32) (observation, error) {
+			lat, lon, err := positions.latest(ctx, radio)
+			if err != nil {
+				return observation{}, err
+			}
+			return api.lookupPoint(ctx, lat, lon)
+		}
 	}
 	return r.receive(ctx, conn.Recv)
 }
@@ -213,11 +233,33 @@ func voicePromptRoute(b *pluginv1.Burst, now time.Time) (*pluginv1.Text, enums.C
 
 func (r responder) promptCaller(ctx context.Context, t *pluginv1.Text, cc enums.ColorCode) {
 	slog.Info("ZIP Weather: private voice call ended", "radio", t.GetSource(), "slot", t.GetSlot())
+	body := r.voiceReply(ctx, t.GetSource())
+	if ctx.Err() != nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(ctx, replyWait)
 	defer cancel()
-	if _, err := r.etsi.reply(ctx, t.GetDestination(), t, zipPrompt, cc); err != nil {
-		slog.Warn("ZIP Weather: could not send the ZIP prompt", "radio", t.GetSource(), "error", err)
+	if _, err := r.etsi.reply(ctx, t.GetDestination(), t, body, cc); err != nil {
+		slog.Warn("ZIP Weather: could not send the voice call reply", "radio", t.GetSource(), "error", err)
 	}
+}
+
+func (r responder) voiceReply(ctx context.Context, radio uint32) string {
+	if r.local == nil {
+		return zipPrompt
+	}
+	ctx, cancel := context.WithTimeout(ctx, lookupWait)
+	defer cancel()
+	obs, err := r.local(ctx, radio)
+	if err != nil {
+		if !errors.Is(err, errNoPosition) && !errors.Is(err, errHTTPNotFound) {
+			// Provider errors can include the coordinates in the request URL.
+			slog.Warn("ZIP Weather: location-based weather unavailable", "radio", radio)
+		}
+		return zipPrompt
+	}
+	body, _ := obs.messages("Local WX")
+	return body
 }
 
 func (r responder) replyHubText(ctx context.Context, source uint32, t *pluginv1.Text, body string) (string, error) {

@@ -34,6 +34,19 @@ jobs:
         env:
           ZIP_WEATHER_WASM: ${{ github.workspace }}/dmrhub-weather.wasm
         run: go test ./plugins/weather -run '^TestUploadable'
+      - name: Build the external plugin for Linux
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+        run: |
+          mkdir -p weather-linux
+          GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o weather-linux/dmrhub-weather-linux-amd64 ./plugins/weather/cmd/weather
+          GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o weather-linux/dmrhub-weather-linux-arm64 ./plugins/weather/cmd/weather
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dmrhub-weather-linux
+          path: weather-linux/
+          if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dmrhub-weather-wasm
